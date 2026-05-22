@@ -286,8 +286,24 @@ There is **NO dedicated “orders database”**.
 
 ## Install tools in Local Machine
 
-- AWS CLI
+- AWS CLI (x86_64-Ubuntu)
+```bash
+sudo apt install unzip curl -y
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version
+```
+- Configure aws
+```bash
+aws configure
+aws sts get-caller-identity
+```
 - Terraform in your local machine
+```bash
+https://developer.hashicorp.com/terraform/install#linux
+terraform -version
+```
 - Create an IAM user and create access key and secret access key for the user and do `aws configure`
 
 Clone the repo:
@@ -327,8 +343,9 @@ Create a bucket using Console or AWS CLI.
 
 ```bash
 aws s3api create-bucket \
-  --bucket devopsdock-terraform-backend-bucket \
-  --region us-east-1
+  --bucket dk1-terraform-bucket \
+  --region ap-south-1 \
+  --create-bucket-configuration LocationConstraint=ap-south-1
 ```
 
 Enable versioning and bucket encryption:
@@ -336,12 +353,11 @@ Enable versioning and bucket encryption:
 ```bash
 # Enable versioning
 aws s3api put-bucket-versioning \
-  --bucket devopsdock-terraform-backend-bucket \
+  --bucket dk1-terraform-bucket \
   --versioning-configuration Status=Enabled
-
 # Enable encryption
 aws s3api put-bucket-encryption \
-  --bucket devopsdock-terraform-backend-bucket \
+  --bucket dk1-terraform-bucket \
   --server-side-encryption-configuration '{
     "Rules":[{
       "ApplyServerSideEncryptionByDefault":{
@@ -349,7 +365,6 @@ aws s3api put-bucket-encryption \
       }
     }]
   }'
-
 ```
 
 Add this below backend block in `terraform.tf` file
@@ -357,9 +372,9 @@ Add this below backend block in `terraform.tf` file
 ```bash
 terraform {
   backend "s3" {
-    bucket = "devopsdock-terraform-backend-bucket"
+    bucket = "dk1-terraform-bucket"
     key    = "s3-backend"
-    region = "us-east-1"
+    region = "ap-south-1"
   }
 }
 ```
@@ -412,7 +427,12 @@ Do `aws configure` and set up with the access and secret access keys , You can u
 Then, import the kubeconfig file by putting the below command.
 
 ```bash
-aws eks update-kubeconfig --region <your-region> --name <your-cluster-name> 
+aws eks update-kubeconfig --region <your-region> --name <your-cluster-name>
+kubectl config get-contexts
+kubectl config current-context
+kubectl get nodes
+kubectl get nodes -o wide
+kubectl config use-context <arn:aws:eks:ap-south-1:...>
 ```
 
 After added the context check:
@@ -437,7 +457,11 @@ Docs: [https://docs.aws.amazon.com/eks/latest/userguide/lbc-helm.html](https://d
 [https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/installation/](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/installation/)
 
 Create an IAM OIDC provider. You can skip this step if you already have one for your cluster. In our case this is done at the terraform level.
-
+To Verify it
+```bash
+ aws eks describe-cluster --name terraform-cluster --query "cluster.identity.oidc.issuer" --output json
+ ```
+To Create it
 ```bash
 eksctl utils associate-iam-oidc-provider \
     --region <region-code> \
@@ -473,7 +497,20 @@ eksctl utils associate-iam-oidc-provider \
         --region <aws-region-code> \
         --approve
     ```
-    
+    ```bash
+    eksctl create iamserviceaccount \
+    --cluster=terraform-cluster \
+    --namespace=kube-system \
+    --name=aws-load-balancer-controller \
+    --attach-policy-arn=arn:aws:iam::$(aws sts get-caller-identity --query "Account" --output text):policy/AWSLoadBalancerControllerIAMPolicy \
+    --override-existing-serviceaccounts \
+    --region ap-south-1 \
+    --approve
+    ```
+*Route53 configuration*
+  ->Route53 > Create hosted zones > give domain name and select public hoisted zone > select the ns servers and paste in the domain registar.
+  ->ACM > List certificates > Request > Request public certificate > give domain name > view certificate > click create records in route 53.
+  ->Route 53 > select the domain and in the records we can see a cname record will be generated.
 
 **Install AWS Load Balancer Controller**
 
@@ -498,8 +535,8 @@ eksctl utils associate-iam-oidc-provider \
         ```bash
         helm upgrade -i aws-load-balancer-controller eks/aws-load-balancer-controller \
           -n kube-system \
-          --set clusterName=test-terraform-cluster \
-          --set region=us-east-1 \
+          --set clusterName=terraform-cluster \
+          --set region=ap-south-1 \
           --set vpcId=vpc-045ed20a9ec483107 \
           --set serviceAccount.create=false \
           --set serviceAccount.name=aws-load-balancer-controller \
@@ -622,13 +659,13 @@ spec:
   - name: http
     protocol: HTTP
     port: 80
-    hostname: "*.devopsdock.site"
+    hostname: "*.kdileep.dpdns.org"
     allowedRoutes:
       namespaces:
         from: All
   - name: https
     protocol: HTTPS
-    hostname: "*.devopsdock.site"
+    hostname: "*.kdileep.dpdns.org"
     port: 443
     allowedRoutes:
       namespaces:
@@ -649,7 +686,26 @@ kubectl get gateway
 NAME              CLASS                   ADDRESS                                                                  PROGRAMMED   AGE
 app-alb-gateway   aws-alb-gateway-class   k8s-default-appalbga-65aa25bc91-1838810992.us-east-1.elb.amazonaws.com   Unknown      5s
 ```
-
+```bash
+kubectl get gatewayclass
+NAME                    CONTROLLER            ACCEPTED   AGE
+aws-alb-gateway-class   gateway.k8s.aws/alb   True       27m
+```
+->The Accepted should be True
+->Debug with below commands
+```bash
+kubectl describe gateway app-alb-gateway
+kubectl get sa -n kube-system aws-load-balancer-controller
+kubectl get sa -n kube-system aws-load-balancer-controller -o yaml
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100
+//Make the service account to True
+helm upgrade -i aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=terraform-cluster \
+  --set serviceAccount.create=true \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set featureGates.GatewayAPI=true
+```
 ## **Deploying External DNS:**
 
 Docs: 
@@ -728,12 +784,13 @@ kubectl create ns external-dns
 ```
 
 ```bash
-eksctl create podidentityassociation \
-  --cluster $EKS_CLUSTER_NAME \
-  --namespace external-dns \
-  --service-account-name external-dns \
-  --role-name external-dns-pod-identity-role \
-  --permission-policy-arns $POLICY_ARN
+helm upgrade -i aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=terraform-cluster \
+  --set serviceAccount.create=true \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set featureGates.GatewayAPI=true \
+  --set awsRegion=ap-south-1
 ```
 
 **Deploy ExternalDNS using Pod Identity**
@@ -788,7 +845,7 @@ Upgrade the install:
 ```bash
 helm upgrade -i external-dns external-dns/external-dns -f external-dns-values-1.20.0.yaml -n external-dns --version 1.20.0
 ```
-
+->After above step open the aws route53 > Hosted zones > domain >some records got generated.
 ## Deploy ArgoCD
 
 Docs: [https://artifacthub.io/packages/helm/argo/argo-cd](https://artifacthub.io/packages/helm/argo/argo-cd) 
@@ -853,7 +910,7 @@ configs:
     # -- List of hostnames for the HTTPRoute
     # @default -- `[]` (See [values.yaml])
     hostnames:
-      - argocd.devopsdock.site
+      - kdileep.dpdns.org
     # -- HTTPRoute rules configuration
     # @default -- `[]` (See [values.yaml])
     rules:
@@ -997,7 +1054,7 @@ kubectl apply -f target-grp-config.yaml
 Access directly in the browser:
 
 ```bash
-https://argocd.devopsdock.site
+https://kdileep.dpdns.org
 ```
 
 To get the password and user:
